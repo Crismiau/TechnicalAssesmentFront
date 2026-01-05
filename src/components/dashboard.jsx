@@ -10,10 +10,36 @@ export default function Dashboard() {
     const [newProjectName, setNewProjectName] = useState('');
     const [newProjectStatus, setNewProjectStatus] = useState('ACTIVE');
 
+    // Normaliza y devuelve un id como `string` (o null si no existe)
+    const getPid = (p) => {
+        const id = p?.id ?? p?.projectId ?? p?._id ?? p?.ID ?? p?.uuid;
+        return id != null ? String(id) : null;
+    };
+
+    // Busca objeto de proyecto por id normalizado
+    const getProjectById = (id) => {
+        if (!id) return null;
+        return projects.find(p => getPid(p) === String(id)) || null;
+    };
+
     const fetchProjects = async () => {
         try {
-            const res = await api.get('/projects'); 
-            setProjects(res.data);
+            const res = await api.get('/projects');
+            console.debug('fetchProjects response:', res.data);
+            // Normalizar diferentes formas de respuesta (array, Page, wrapper)
+            const d = res.data;
+            let items = [];
+            if (Array.isArray(d)) items = d;
+            else if (Array.isArray(d?.content)) items = d.content;
+            else if (Array.isArray(d?.projects)) items = d.projects;
+            else if (Array.isArray(d?.items)) items = d.items;
+            else {
+                for (const k of Object.keys(d || {})) {
+                    if (Array.isArray(d[k])) { items = d[k]; break; }
+                }
+            }
+            setProjects(items || []);
+            console.debug('projects set, count=', (items || []).length);
         } catch (err) { console.error('Error cargando proyectos', err); }
     };
 
@@ -62,12 +88,24 @@ export default function Dashboard() {
         e.preventDefault();
         try {
             const res = await api.post('/projects', { name: newProjectName, status: newProjectStatus });
+            console.debug('createProject response:', res.data);
             setNewProjectName('');
             setNewProjectStatus('ACTIVE');
             setShowCreateProject(false);
             await fetchProjects();
-            // select the new project if id returned
-            const createdId = res?.data?.id;
+            // select the new project if id returned (robusto a distintos nombres)
+            const createdIdRaw = res?.data?.id || res?.data?.projectId || res?.data?._id || res?.data?.ID || res?.data?.uuid;
+            const createdId = createdIdRaw != null ? String(createdIdRaw) : null;
+            // si la respuesta incluye el proyecto creado como objeto, añadirlo inmediatamente al estado
+            const createdObj = res?.data && typeof res.data === 'object' && (res.data.name || res.data.title) ? res.data : (res?.data?.project || null);
+            if (createdObj) {
+                setProjects(prev => {
+                    // evitar duplicados por id
+                    const id = getPid(createdObj) ?? createdId ?? `proj-new`;
+                    if (prev.some(p => String(getPid(p)) === String(id))) return prev;
+                    return [createdObj, ...prev];
+                });
+            }
             if (createdId) {
                 setSelectedProjectId(createdId);
                 fetchTasks(createdId);
@@ -78,6 +116,23 @@ export default function Dashboard() {
     useEffect(() => { fetchProjects(); }, []);
 
     useEffect(() => { if (selectedProjectId) fetchTasks(selectedProjectId); else setProjectTasks([]); }, [selectedProjectId]);
+
+    // proyecto seleccionado (objeto) para mostrar nombre y otros datos
+    const selectedProject = getProjectById(selectedProjectId);
+
+    // Maneja la selección de proyecto: usa tareas embebidas si existen, o solicita al backend
+    const handleSelectProject = (id) => {
+        setSelectedProjectId(id);
+        const proj = getProjectById(id);
+        // normalizar posibles campos con tareas
+        const embedded = proj?.tasks ?? proj?.projectTasks ?? proj?.items ?? proj?.children ?? null;
+        if (Array.isArray(embedded) && embedded.length > 0) {
+            setProjectTasks(embedded);
+        } else {
+            // pedir al backend (fetchTasks manejará errores y vacíos)
+            fetchTasks(id);
+        }
+    };
 
     return (
         <div className="max-w-6xl mx-auto p-8">
@@ -105,16 +160,25 @@ export default function Dashboard() {
                 <section>
                     <h2 className="text-xl font-bold mb-4">Mis Proyectos</h2>
                     <div className="space-y-3">
-                        {projects.map(p => (
-                            <div 
-                                key={p.id} 
-                                onClick={() => setSelectedProjectId(p.id)}
-                                className={`p-4 border rounded-xl cursor-pointer transition ${selectedProjectId === p.id ? 'border-blue-500 bg-blue-50' : 'bg-white hover:shadow-md'}`}
-                            >
-                                <p className="font-semibold text-gray-800">{p.name}</p>
-                                <span className="text-xs font-medium px-2 py-1 rounded-full bg-gray-200 text-gray-600">{p.status}</span>
-                            </div>
-                        ))}
+                        {projects.map((p, idx) => {
+                            const pid = getPid(p) ?? `proj-${idx}`;
+                            const pname = p.name || p.title || p.nombre || 'Proyecto';
+                            const pstatus = p.status || '';
+                            const isSelected = String(selectedProjectId) === String(pid);
+                            return (
+                                <button
+                                    type="button"
+                                    key={pid}
+                                    onClick={() => handleSelectProject(pid)}
+                                    className={`w-full text-left p-4 border rounded-xl transition-flex items-center ${isSelected ? 'bg-black text-white shadow-md' : 'bg-white hover:shadow-md'}`}
+                                >
+                                    <div className="flex items-center justify-between">
+                                        <p className="font-semibold">{pname}</p>
+                                        <span className="text-xs font-medium px-2 py-1 rounded-full bg-gray-200 text-gray-600">{pstatus}</span>
+                                    </div>
+                                </button>
+                            );
+                        })}
                     </div>
                 </section>
 
@@ -125,7 +189,7 @@ export default function Dashboard() {
                         <p className="text-gray-400">Selecciona un proyecto para ver y gestionar sus tareas</p>
                     ) : (
                         <>
-                            <p className="text-sm text-gray-500 mb-4">Proyecto seleccionado: {selectedProjectId}</p>
+                            <p className="text-sm text-gray-500 mb-4">Proyecto seleccionado: {selectedProject?.name || selectedProjectId}</p>
 
                             <div className="mb-4">
                                 <form onSubmit={handleCreateTask} className="flex gap-2">
@@ -144,15 +208,19 @@ export default function Dashboard() {
                                 {projectTasks.length === 0 ? (
                                     <p className="text-gray-500">No hay tareas aún</p>
                                 ) : (
-                                    projectTasks.map(t => (
-                                        <div key={t.id} className="p-3 bg-white rounded shadow-sm flex justify-between items-center">
-                                            <div>
-                                                <p className="font-semibold">{t.name}</p>
-                                                <p className="text-xs text-gray-500">{t.description}</p>
+                                    projectTasks.map((t, idx) => {
+                                        const tid = String(t.id ?? t.taskId ?? t._id ?? `task-${idx}`);
+                                        const tname = t.name || t.title || 'Tarea';
+                                        return (
+                                            <div key={tid} className="p-3 bg-white rounded shadow-sm flex justify-between items-center">
+                                                <div>
+                                                    <p className="font-semibold">{tname}</p>
+                                                    <p className="text-xs text-gray-500">{t.description}</p>
+                                                </div>
+                                                <span className="text-sm text-gray-600">{t.status || ''}</span>
                                             </div>
-                                            <span className="text-sm text-gray-600">{t.status || ''}</span>
-                                        </div>
-                                    ))
+                                        );
+                                    })
                                 )}
                             </div>
                         </>

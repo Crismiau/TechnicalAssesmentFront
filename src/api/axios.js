@@ -4,7 +4,6 @@ const api = axios.create({
     baseURL: import.meta.env.VITE_API_URL || 'http://localhost:8080/api'
 });
 
-// Este interceptor añade el token a cada petición si existe
 api.interceptors.request.use((config) => {
     const token = localStorage.getItem('token');
     if (token) {
